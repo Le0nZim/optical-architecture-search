@@ -56,12 +56,12 @@ def super_gaussian_pupil(field: Field, w: ScalarLike, n: ScalarLike = 16) -> Fie
 
 def tukey_pupil(field: Field, w: ScalarLike) -> Field:
     """Applies a Tukey pupil of width ``w`` to ``field``."""
-    alpha = w / linf_norm(field.extent)
+    alpha = jnp.clip(w / linf_norm(field.extent), 0.0, 1.0)
     grid = jnp.clip(l2_norm(field.grid / field.extent), 0, 0.5)
     mask = jnp.where(
         grid <= (alpha / 2),
         1,
-        0.5 * (1 + jnp.cos((2 * jnp.pi / jnp.array(1 - alpha)) * (grid - alpha / 2))),
+        0.5 * (1 + jnp.cos((2 * jnp.pi / jnp.maximum(1 - alpha, 1e-6)) * (grid - alpha / 2))),
     )
     return field * mask
 

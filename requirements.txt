@@ -1,0 +1,4 @@
+# Python 3.12+; install from the repository root.
+-e ./chromatix
+matplotlib>=3.10
+pytest>=8

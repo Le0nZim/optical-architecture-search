@@ -6,18 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-def generate_target_image(shape, dx, spectrum, f1, f2, a_mask):
-    """
-    Simulates the ideal 4f system to generate the target intensity pattern.
-    """
-    field = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-    field = cx.amplitude_change(field, a_mask)
-    
-    # Ideal 4f
-    field = cx.ff_lens(field, f=f1, n=1.0)
-    field = cx.ff_lens(field, f=f2, n=1.0)
-    
-    return field.intensity
+from chromatix import crop
+from oas_core import generate_target_image, input_field, normalized_mse
 
 def simulate_search_architecture(params, shape, dx, spectrum, a_mask, pad_width):
     """
@@ -26,35 +16,34 @@ def simulate_search_architecture(params, shape, dx, spectrum, a_mask, pad_width)
     """
     phi1 = params['phi1']
     phi2 = params['phi2']
-    z1 = params['z1']
-    z2 = params['z2']
-    z3 = params['z3']
+    z1 = jnp.maximum(params['z1'], 1.0)
+    z2 = jnp.maximum(params['z2'], 1.0)
+    z3 = jnp.maximum(params['z3'], 1.0)
     
-    field = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-    field = cx.amplitude_change(field, a_mask)
+    field = input_field(shape, dx, spectrum, a_mask, "5.1. Amplitude Imaging", pad_width)
     
     # Propagate z1
-    field = cx.transfer_propagate(field, z=z1, n=1.0, pad_width=pad_width, mode="same")
+    field = cx.transfer_propagate(field, z=z1, n=1.0, pad_width=0, mode="same")
     
     # Phase Mask 1
-    field = cx.phase_change(field, phi1)
+    field = cx.phase_change(field, jnp.pad(phi1, pad_width))
     
     # Propagate z2
-    field = cx.transfer_propagate(field, z=z2, n=1.0, pad_width=pad_width, mode="same")
+    field = cx.transfer_propagate(field, z=z2, n=1.0, pad_width=0, mode="same")
     
     # Phase Mask 2
-    field = cx.phase_change(field, phi2)
+    field = cx.phase_change(field, jnp.pad(phi2, pad_width))
     
     # Propagate z3
-    field = cx.transfer_propagate(field, z=z3, n=1.0, pad_width=pad_width, mode="same")
+    field = cx.transfer_propagate(field, z=z3, n=1.0, pad_width=0, mode="same")
     
-    return field.intensity
+    return crop(field, pad_width).intensity
 
 def loss_fn(params, shape, dx, spectrum, a_mask, target_I, pad_width):
     I_out = simulate_search_architecture(params, shape, dx, spectrum, a_mask, pad_width)
     
     # MSE loss scaled up
-    mse_loss = jnp.mean((I_out - target_I) ** 2) / jnp.mean(target_I ** 2)
+    mse_loss = normalized_mse(I_out, target_I)
               
     return mse_loss
 
@@ -99,6 +88,8 @@ def optimize():
         loss, grads = jax.value_and_grad(loss_fn)(params, shape, dx, spectrum, a_mask, target_I, pad_width)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
+        for name in ('z1', 'z2', 'z3'):
+            params[name] = jnp.clip(params[name], 1.0, 40000.0)
         return params, opt_state, loss
 
     epochs = 500
@@ -127,7 +118,7 @@ def optimize():
     plt.imshow(target_I.squeeze(), cmap='gray')
     plt.colorbar()
     
-    plt.subplot(1, 3, 2)
+    plt.subplot(1, 4, 2)
     plt.title("Learned Architecture Output")
     plt.imshow(final_I.squeeze(), cmap='gray')
     plt.colorbar()

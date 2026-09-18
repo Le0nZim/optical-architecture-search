@@ -1,0 +1,3 @@
+-r requirements.txt
+streamlit>=1.40
+torchvision>=0.20

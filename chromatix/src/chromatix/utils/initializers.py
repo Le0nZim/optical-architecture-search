@@ -200,9 +200,9 @@ def sawtooth_phase(
     grid = rotate_grid(grid, rotation)
     phase = grid[1] - grid[1].min()
     phase = phase % period
-    phase = (
-        2 * jnp.pi * dn * thickness * (phase / phase.max()) / jnp.asarray(wavelength)
-    )
+    # The relief height is set by the physical period, not the largest sampled
+    # coordinate (which changes with the grid and can be zero).
+    phase = 2 * jnp.pi * dn * thickness * (phase / period) / jnp.asarray(wavelength)
     return phase
 
 
@@ -221,9 +221,9 @@ def sinusoid_phase(
     grid = rotate_grid(grid, rotation)
     phase = grid[1] - grid[1].min()
     phase = jnp.sin(2 * jnp.pi * phase / period)
-    phase = (
-        2 * jnp.pi * dn * thickness * (phase / phase.max()) / jnp.asarray(wavelength)
-    )
+    # A sinusoid already has unit amplitude. Normalizing by the sampled maximum
+    # changes the optic with the sampling grid and is singular at its zeros.
+    phase = 2 * jnp.pi * dn * thickness * phase / jnp.asarray(wavelength)
     return phase
 
 

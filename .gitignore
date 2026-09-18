@@ -5,9 +5,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 .DS_Store
-data/
+/data/
+.pytest_cache/
 .streamlit/
 
 # Local reference materials (not in repo)
 _writeups/
 _ref/
+
+# Local search outputs
+oas_smoke_result.json
+amplitude_result.json
+phase_result.json

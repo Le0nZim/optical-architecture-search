@@ -12,8 +12,8 @@ We jointly optimize the continuous parameters of the architecture:
 - phi1, phi2: the spatially varying phase masks
 
 By optimizing the MSE loss against the ideal target (from a simulated ideal 4f system),
-the search algorithm will implicitly "learn" that the lenses and distances should converge 
-towards a 4f configuration, without us hardcoding the 4f system directly.
+the search may find a useful intensity transformation. Intensity-only agreement
+does not identify unique phase masks or imply convergence to a classical 4f layout.
 """
 
 import jax
@@ -22,51 +22,40 @@ import optax
 import chromatix.functional as cx
 import matplotlib.pyplot as plt
 
-def generate_target_image(shape, dx, spectrum, f1, f2, a_mask):
-    """
-    Simulates the ideal 4f system to generate the target intensity pattern for the task.
-    """
-    field = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-    field = cx.amplitude_change(field, a_mask)
-    
-    # Target uses ideal Fourier optics thin lenses in 4f config
-    field = cx.ff_lens(field, f=f1, n=1.0)
-    field = cx.ff_lens(field, f=f2, n=1.0)
-    
-    return field.intensity
+from chromatix import crop
+from oas_core import generate_target_image, input_field, normalized_mse
 
 def simulate_search_architecture(params, shape, dx, spectrum, a_mask, pad_width):
     """
     Simulates the proposed continuous architecture search space.
     """
     phi1, phi2 = params['phi1'], params['phi2']
-    z1, z2, z3 = params['z1'], params['z2'], params['z3']
+    z1, z2, z3 = (jnp.maximum(params[name], 1.0) for name in ('z1', 'z2', 'z3'))
     
-    field = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-    field = cx.amplitude_change(field, a_mask)
+    field = input_field(shape, dx, spectrum, a_mask, "5.1. Amplitude Imaging", pad_width)
     
     # Element 1: Free space propagation
-    field = cx.transfer_propagate(field, z=z1, n=1.0, pad_width=pad_width, mode="same")
+    field = cx.transfer_propagate(field, z=z1, n=1.0, pad_width=0, mode="same")
     
     # Element 2: Learnable phase mask 1
-    field = cx.phase_change(field, phi1)
+    field = cx.phase_change(field, jnp.pad(phi1, pad_width))
     
     # Element 3: Free space propagation
-    field = cx.transfer_propagate(field, z=z2, n=1.0, pad_width=pad_width, mode="same")
+    field = cx.transfer_propagate(field, z=z2, n=1.0, pad_width=0, mode="same")
     
     # Element 4: Learnable phase mask 2
-    field = cx.phase_change(field, phi2)
+    field = cx.phase_change(field, jnp.pad(phi2, pad_width))
     
     # Element 5: Free space propagation
-    field = cx.transfer_propagate(field, z=z3, n=1.0, pad_width=pad_width, mode="same")
+    field = cx.transfer_propagate(field, z=z3, n=1.0, pad_width=0, mode="same")
     
-    return field.intensity
+    return crop(field, pad_width).intensity
 
 def loss_fn(params, shape, dx, spectrum, a_mask, target_I, pad_width):
     I_out = simulate_search_architecture(params, shape, dx, spectrum, a_mask, pad_width)
     
     # Normalized MSE loss
-    mse_loss = jnp.mean((I_out - target_I) ** 2) / jnp.mean(target_I ** 2)
+    mse_loss = normalized_mse(I_out, target_I)
     return mse_loss
 
 def optimize():
@@ -110,6 +99,8 @@ def optimize():
         loss, grads = jax.value_and_grad(loss_fn)(params, shape, dx, spectrum, a_mask, target_I, pad_width)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
+        for name in ('z1', 'z2', 'z3'):
+            params[name] = jnp.clip(params[name], 1.0, 40000.0)
         return params, opt_state, loss
 
     epochs = 500

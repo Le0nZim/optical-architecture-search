@@ -1,335 +1,136 @@
-import streamlit as st
-import jax
-import jax.numpy as jnp
-import optax
-import chromatix.functional as cx
+"""Streamlit front end for the tested, headless memetic search."""
+
+import json
+from dataclasses import asdict
+
 import matplotlib.pyplot as plt
-import numpy as np
-import torchvision
-import torchvision.transforms as transforms
-import torch
+import streamlit as st
 
-st.set_page_config(page_title="Memetic OAS GUI", layout="wide")
+from oas_core import (
+    AMPLITUDE, PHASE, SearchConfig, describe_architecture, evaluate, run_search,
+    sampling_warnings,
+)
+from oas_data import load_cifar_batch
 
-# Our library of discrete optical elements
-OPS = [
-    "Propagate", 
-    "ThinLens", 
-    "Identity", 
-    "CircularPupil", 
-    "SquarePupil", 
-    "GaussianPupil",
-    "SuperGaussianPupil",
-    "RectangularPupil",
-    "TukeyPupil",
-    "Axicon",
-    "SawtoothGrating",
-    "SinusoidGrating"
-]
 
 @st.cache_data
-def load_cifar_batch(batch_size, img_size):
-    transform = transforms.Compose([
-        transforms.Grayscale(num_output_channels=1),
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor()
-    ])
-    dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    loader = jax.tree_util.tree_map(lambda x: jnp.array(x.numpy()), 
-                                    next(iter(torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True))))
-    return loader[0].squeeze(1)
+def cached_cifar(batch_size, img_size, split, seed):
+    return load_cifar_batch(batch_size, img_size, split=split, seed=seed)
 
-def generate_target_image(shape, dx, spectrum, f1, f2, obj, task):
-    if task == "5.1. Amplitude Imaging":
-        field = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-        field = cx.amplitude_change(field, obj)
-        field = cx.ff_lens(field, f=f1, n=1.0)
-        field = cx.ff_lens(field, f=f2, n=1.0)
-        return field.intensity
-    else:
-        # 5.2. Phase Imaging
-        # The object is a phase mask. We want the intensity to linearly correspond to the phase.
-        # So our target is simply the input mask (scaled appropriately).
-        return obj
-
-def simulate_discrete_architecture(z, f, w, arch_indices, shape, dx, spectrum, obj, pad_width, task):
-    field = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-    if task == "5.1. Amplitude Imaging":
-        field = cx.amplitude_change(field, obj)
-    else:
-        # 5.2 Phase Imaging: obj is the phase modulation (0 to 1 -> 0 to 2pi)
-        field = cx.phase_change(field, obj * 2 * jnp.pi)
-    
-    z = jnp.abs(z) + 1e-3
-    f = jnp.abs(f) + 1e-3
-    w = jnp.abs(w) + 1e-3
-    
-    for i in range(arch_indices.shape[0]):
-        def do_prop(fld):
-            return cx.transfer_propagate(fld, z=z[i], n=1.0, pad_width=pad_width, mode="same")
-        def do_lens(fld):
-            return cx.thin_lens(fld, f=f[i], n=1.0)
-        def do_id(fld):
-            return fld
-        def do_circ(fld):
-            return cx.circular_pupil(fld, w=w[i])
-        def do_sq(fld):
-            return cx.square_pupil(fld, w=w[i])
-        def do_gauss(fld):
-            return cx.gaussian_pupil(fld, w=w[i])
-        def do_supergauss(fld):
-            return cx.super_gaussian_pupil(fld, w=w[i], n=16.0)
-        def do_rect(fld):
-            # Let's make it a rectangle with h = w / 2 for some variety
-            return cx.rectangular_pupil(fld, h=w[i]/2.0, w=w[i])
-        def do_tukey(fld):
-            return cx.tukey_pupil(fld, w=w[i])
-        def do_axicon(fld):
-            return cx.axicon(fld, n_axicon=1.5, slope_angle=w[i]/1000.0)
-        def do_grating(fld):
-            return cx.sawtooth_grating(fld, n_grating=1.5, period=w[i]/2.0, thickness=w[i]/5.0)
-        def do_sin_grating(fld):
-            return cx.sinusoid_grating(fld, n_grating=1.5, period=w[i]/2.0, thickness=w[i]/5.0)
-        
-        field = jax.lax.switch(arch_indices[i], [
-            do_prop, do_lens, do_id, 
-            do_circ, do_sq, do_gauss, do_supergauss, do_rect, do_tukey,
-            do_axicon, do_grating, do_sin_grating
-        ], field)
-        
-    return field.intensity
-
-def loss_fn(z, f, w, arch_indices, shape, dx, spectrum, obj, target_I, pad_width, task):
-    I_out = simulate_discrete_architecture(z, f, w, arch_indices, shape, dx, spectrum, obj, pad_width, task)
-    if task == "5.1. Amplitude Imaging":
-        mse_loss = jnp.mean((I_out - target_I) ** 2) / (jnp.mean(target_I ** 2) + 1e-8)
-        return mse_loss
-    else:
-        # For Phase Imaging, absolute intensity scale might vary significantly.
-        # We use a structurally normalized MSE to ensure it's scale-invariant.
-        I_out_norm = (I_out - jnp.mean(I_out)) / (jnp.std(I_out) + 1e-8)
-        target_I_norm = (target_I - jnp.mean(target_I)) / (jnp.std(target_I) + 1e-8)
-        mse_loss = jnp.mean((I_out_norm - target_I_norm) ** 2)
-        return mse_loss
 
 def draw_schematic(ax, architecture, title="Optical System"):
     current_z = 0.0
-    ax.axhline(0, color='black', linestyle='-.', linewidth=1)
-    ax.axvline(0, color='green', linewidth=3, label='Object Plane')
-    ax.text(0, 1.2, 'Object', rotation=90, va='bottom', ha='center', color='green')
-    
-    for op, val in architecture:
+    ax.axhline(0, color="black", linestyle="-.", linewidth=1)
+    ax.axvline(0, color="green", linewidth=3)
+    ax.text(0, 1.2, "Object", rotation=90, ha="center", color="green")
+    for element in architecture:
+        op = element["operation"]
         if op == "Propagate":
-            z_val = val
-            ax.annotate('', xy=(current_z + z_val, 0.5), xytext=(current_z, 0.5),
-                        arrowprops=dict(arrowstyle='<|-|>', color='gray'))
-            ax.text(current_z + z_val/2, 0.6, f"z={val:.0f}", ha='center')
-            current_z += z_val
-        elif op == "ThinLens":
-            ax.axvline(current_z, ymin=0.1, ymax=0.9, color='blue', linewidth=2)
-            ax.annotate('', xy=(current_z, 1.0), xytext=(current_z, 0.8), arrowprops=dict(arrowstyle='->', color='blue'))
-            ax.annotate('', xy=(current_z, -1.0), xytext=(current_z, -0.8), arrowprops=dict(arrowstyle='->', color='blue'))
-            ax.text(current_z, 1.2, f"f={val:.0f}", rotation=90, va='bottom', ha='center', color='blue')
-        elif op in ["CircularPupil", "SquarePupil", "GaussianPupil", "SuperGaussianPupil", "RectangularPupil"]:
-            ax.axvline(current_z, ymin=0.3, ymax=0.7, color='orange', linewidth=4)
-            ax.text(current_z, 0.8, f"{op[:4]}\nw={val:.0f}", rotation=90, va='bottom', ha='center', color='orange')
-        elif op in ["Axicon", "SawtoothGrating", "SinusoidGrating"]:
-            ax.axvline(current_z, ymin=0.1, ymax=0.9, color='purple', linewidth=3)
-            ax.text(current_z, -1.2, f"{op[:4]}\np={val:.0f}", rotation=90, va='top', ha='center', color='purple')
-            
-    ax.axvline(current_z, color='red', linewidth=3, label='Image Plane')
-    ax.text(current_z, 1.2, 'Sensor', rotation=90, va='bottom', ha='center', color='red')
-    
-    max_z = current_z if current_z > 0 else 100.0
-    ax.set_xlim(-0.1 * max_z, max_z * 1.1)
-    ax.set_ylim(-2, 2)
-    ax.axis('off')
+            distance = element["z_um"]
+            ax.annotate("", xy=(current_z + distance, 0.5), xytext=(current_z, 0.5),
+                        arrowprops={"arrowstyle": "<|-|>", "color": "gray"})
+            ax.text(current_z + distance / 2, 0.6, f"{distance:.0f} µm", ha="center")
+            current_z += distance
+        elif op != "Identity":
+            color = "blue" if op == "ThinLens" else ("orange" if "Pupil" in op else "purple")
+            ax.axvline(current_z, ymin=0.25, ymax=0.75, color=color, linewidth=2)
+            ax.text(current_z, -1.1, op, rotation=90, va="top", ha="center", color=color)
+    ax.axvline(current_z, color="red", linewidth=3)
+    ax.text(current_z, 1.2, "Sensor", rotation=90, ha="center", color="red")
+    extent = max(current_z, 100)
+    ax.set_xlim(-0.1 * extent, 1.1 * extent)
+    ax.set_ylim(-3, 2)
+    ax.axis("off")
     ax.set_title(title)
 
-def get_arch_from_params(arch_indices, z, f, w):
-    proposed_arch = [OPS[idx] for idx in arch_indices]
-    arch = []
-    for op, z_val, f_val, w_val in zip(proposed_arch, z, f, w):
-        if op == "Propagate":
-            arch.append((op, float(z_val)))
-        elif op == "ThinLens":
-            arch.append((op, float(f_val)))
-        elif op in ["CircularPupil", "SquarePupil", "GaussianPupil", "SuperGaussianPupil", "RectangularPupil", "TukeyPupil", "Axicon", "SawtoothGrating", "SinusoidGrating"]:
-            arch.append((op, float(w_val)))
-        else:
-            arch.append((op, 0.0))
-    return arch
 
-st.title("Memetic Optical Architecture Search (OAS)")
-st.markdown("Evolutionary Algorithm for discrete choices + Gradient Descent for continuous physics parameters.")
+def main():
+    st.set_page_config(page_title="Memetic OAS GUI", layout="wide")
+    st.title("Memetic Optical Architecture Search (OAS)")
+    st.write("Evolutionary element selection with continuous parameter optimization.")
+    task = st.selectbox("Select Imaging Task", [AMPLITUDE, PHASE])
+    if task == PHASE:
+        st.info("Weak relative phase contrast (0.5 rad range). Absolute/global phase is not observable. "
+                "The contrast objective does not model photon noise; sensor throughput is reported separately.")
+    with st.sidebar:
+        st.header("Search Settings")
+        f1 = st.number_input("Target f1 (µm)", min_value=1.0, value=4000.0, step=100.0)
+        f2 = st.number_input("Target f2 (µm)", min_value=1.0, value=4000.0, step=100.0)
+        blocks = st.number_input("Number of elements", min_value=1, value=7, step=1)
+        population = st.number_input("Population size", min_value=1, value=15, step=1)
+        steps = st.number_input("Gradient steps per generation", min_value=1, value=5, step=1)
+        generations = st.slider("Generations", 1, 200, 60)
+        seed = st.number_input("Random seed", min_value=0, value=42, step=1)
+        padding = st.number_input("Working-grid padding (pixels per side)", min_value=0, value=64, step=16)
+        run = st.button("Run Architecture Search", type="primary")
+    if run:
+        config = SearchConfig(f1=f1, f2=f2, task=task, num_blocks=blocks,
+                              pop_size=population, gd_steps=steps, generations=generations,
+                              seed=seed, pad_width=padding)
+        status = st.empty()
+        bar = st.progress(0.)
+        try:
+            status.write("Loading disjoint CIFAR-10 training and validation samples…")
+            train = cached_cifar(16, config.shape[0], "train", seed)
+            validation = cached_cifar(8, config.shape[0], "validation", seed)
+            def progress(generation, loss):
+                bar.progress(generation / generations)
+                status.write(f"Generation {generation}/{generations} | Best validation loss: {loss:.5g}")
+            result = run_search(config, train, validation, progress)
+            status.write("Evaluating the saved winner on the official CIFAR-10 test split…")
+            test = cached_cifar(16, config.shape[0], "test", seed)
+            performance = evaluate(result, config, test)
+            st.session_state["oas_result"] = (config, result, test, performance)
+            status.success("Search complete")
+        except (ValueError, FloatingPointError, ImportError, RuntimeError, OSError) as exc:
+            st.error(str(exc))
+    if "oas_result" not in st.session_state:
+        st.info("Choose your settings and run the search.")
+        return
+    config, result, test, performance = st.session_state["oas_result"]
+    st.caption(f"Saved run: {config.task}; seed {config.seed}. Metrics below belong to this run.")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Best validation loss", f"{result.validation_loss:.5g}")
+    col2.metric("Held-out test loss (16 images)", f"{performance['loss']:.5g}")
+    col3.metric("Mean sensor throughput", f"{100 * performance['throughput']:.2f}%")
+    st.line_chart({"Best validation loss": result.history})
+    arch = describe_architecture(result.architecture, result.parameters, config.dx, config.spectrum)
+    st.subheader("Learned architecture")
+    for i, element in enumerate(arch):
+        values = ", ".join(f"{key}={value:.5g}" for key, value in element.items() if key != "operation")
+        st.write(f"{i + 1}. {element['operation']}" + (f" ({values})" if values else ""))
+    for message in sampling_warnings(result.architecture, result.parameters,
+            config.shape, config.dx, config.spectrum, config.pad_width):
+        st.warning(message)
+    st.caption("This is a small, noise-free scalar simulation. Verify a promising design with finer "
+               "spatial sampling and larger padding before drawing conclusions about physical performance.")
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7))
+    draw_schematic(axes[0], describe_architecture(result.initial_architecture,
+        result.initial_parameters, config.dx, config.spectrum), "Example initial architecture")
+    draw_schematic(axes[1], arch, "Saved best architecture")
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+    target, output = performance["targets"][0], performance["outputs"][0]
+    for ax, image, title in zip(axes, (test[0], target, output),
+            ("Test object", "Target on sensor grid", "Saved winner output")):
+        limits = {"vmin": 0, "vmax": max(float(target.max()), float(output.max()))} \
+            if config.task == AMPLITUDE and title != "Test object" else {}
+        im = ax.imshow(image, cmap="gray", **limits)
+        ax.set_title(title)
+        fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+    export = {"config": asdict(config), "architecture": arch,
+              "architecture_indices": result.architecture.tolist(),
+              "parameters": {name: value.tolist() for name, value in zip(("z", "f", "w"), result.parameters)},
+              "validation_loss": result.validation_loss, "test_loss": performance["loss"],
+              "test_throughput": performance["throughput"], "history": result.history}
+    st.download_button("Download design and settings", json.dumps(export, indent=2),
+                       "oas_design.json", "application/json")
 
-task_choice = st.selectbox("Select Imaging Task", 
-                           ["5.1. Amplitude Imaging", "5.2. Phase Imaging"], 
-                           index=0, 
-                           help="Select the goal of the optical architecture search.")
 
-col1, col2 = st.columns([1, 4])
-
-with col1:
-    st.header("Search Settings")
-    target_f1 = st.number_input("Target f1 (um)", value=4000.0, step=100.0)
-    target_f2 = st.number_input("Target f2 (um)", value=4000.0, step=100.0)
-    
-    num_blocks = st.number_input("Num Elements in Super-Net", value=7, step=1)
-    pop_size = st.number_input("Population Size", value=15, step=1)
-    gd_steps_per_gen = st.number_input("GD Steps per Generation", value=5, step=1)
-    generations = st.slider("Generations", min_value=1, max_value=200, value=60, step=1)
-    
-    run_btn = st.button("Run Architecture Search", type="primary")
-
-with col2:
-    if run_btn:
-        shape = (64, 64)
-        dx = 5.0
-        spectrum = 0.532
-        pad_width = 64
-        
-        status_text = st.empty()
-        progress_bar = st.progress(0)
-        
-        status_text.text("Loading CIFAR-10...")
-        cifar_batch = load_cifar_batch(batch_size=16, img_size=shape[0])
-        
-        # Init population
-        pop_arch = np.random.randint(0, len(OPS), size=(pop_size, num_blocks))
-        pop_z = np.random.uniform(1000.0, 8000.0, size=(pop_size, num_blocks))
-        pop_f = np.random.uniform(2000.0, 8000.0, size=(pop_size, num_blocks))
-        pop_w = np.random.uniform(50.0, 300.0, size=(pop_size, num_blocks))
-        
-        pop_arch_jnp = jnp.array(pop_arch)
-        pop_z_jnp = jnp.array(pop_z)
-        pop_f_jnp = jnp.array(pop_f)
-        pop_w_jnp = jnp.array(pop_w)
-        
-        initial_arch = get_arch_from_params(pop_arch_jnp[0], pop_z_jnp[0], pop_f_jnp[0], pop_w_jnp[0])
-        
-        optimizer = optax.adam(50.0)
-        opt_state = jax.vmap(optimizer.init)((pop_z_jnp, pop_f_jnp, pop_w_jnp))
-        
-        @jax.jit
-        def train_indiv(z, f, w, opt_state, arch_indices, a_mask, target_I):
-            def l_fn(z_val, f_val, w_val):
-                return loss_fn(z_val, f_val, w_val, arch_indices, shape, dx, spectrum, a_mask, target_I, pad_width, task_choice)
-            loss, grads = jax.value_and_grad(l_fn, argnums=(0, 1, 2))(z, f, w)
-            updates, opt_state = optimizer.update(grads, opt_state, (z, f, w))
-            z_new, f_new, w_new = optax.apply_updates((z, f, w), updates)
-            return z_new, f_new, w_new, opt_state, loss
-
-        batch_train = jax.jit(jax.vmap(train_indiv, in_axes=(0, 0, 0, 0, 0, None, None)))
-        
-        status_text.text("Starting Memetic Architecture Search...")
-        
-        key = jax.random.PRNGKey(42)
-        best_loss_history = []
-        
-        for gen in range(generations):
-            key, subkey = jax.random.split(key)
-            img_idx = jax.random.randint(subkey, (), 0, cifar_batch.shape[0])
-            a_mask = cifar_batch[img_idx]
-            
-            target_I = generate_target_image(shape, dx, spectrum, target_f1, target_f2, a_mask, task_choice)
-            
-            # Gradient Descent Phase
-            for _ in range(gd_steps_per_gen):
-                pop_z_jnp, pop_f_jnp, pop_w_jnp, opt_state, losses = batch_train(pop_z_jnp, pop_f_jnp, pop_w_jnp, opt_state, pop_arch_jnp, a_mask, target_I)
-            
-            # Evolution Phase
-            fitness = np.array(losses)
-            best_loss_history.append(float(np.min(fitness)))
-            sorted_indices = np.argsort(fitness)
-            
-            num_elites = max(1, pop_size // 4)
-            elite_indices = sorted_indices[:num_elites]
-            
-            new_arch = [pop_arch_jnp[i] for i in elite_indices]
-            new_z = [pop_z_jnp[i] for i in elite_indices]
-            new_f = [pop_f_jnp[i] for i in elite_indices]
-            new_w = [pop_w_jnp[i] for i in elite_indices]
-            new_opt = [jax.tree_util.tree_map(lambda x: x[i], opt_state) for i in elite_indices]
-            
-            for _ in range(pop_size - num_elites):
-                parent_idx = np.random.choice(elite_indices)
-                child_arch = np.copy(np.array(pop_arch_jnp[parent_idx]))
-                
-                # Mutate architecture (20% chance)
-                if np.random.rand() < 0.2:
-                    mut_idx = np.random.randint(num_blocks)
-                    child_arch[mut_idx] = np.random.randint(len(OPS))
-                    
-                new_arch.append(jnp.array(child_arch))
-                new_z.append(pop_z_jnp[parent_idx] + np.random.randn(num_blocks)*100.0)
-                new_f.append(pop_f_jnp[parent_idx] + np.random.randn(num_blocks)*100.0)
-                new_w.append(pop_w_jnp[parent_idx] + np.random.randn(num_blocks)*10.0)
-                new_opt.append(jax.tree_util.tree_map(lambda x: x[parent_idx], opt_state))
-                
-            pop_arch_jnp = jnp.stack(new_arch)
-            pop_z_jnp = jnp.stack(new_z)
-            pop_f_jnp = jnp.stack(new_f)
-            pop_w_jnp = jnp.stack(new_w)
-            opt_state = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *new_opt)
-            
-            progress_bar.progress((gen + 1) / generations)
-            status_text.text(f"Generation {gen+1}/{generations} | Best Loss: {fitness[sorted_indices[0]]:.4f}")
-        
-        st.success("Search Complete!")
-        
-        # Best individual
-        best_idx = sorted_indices[0]
-        final_arch = get_arch_from_params(pop_arch_jnp[best_idx], pop_z_jnp[best_idx], pop_f_jnp[best_idx], pop_w_jnp[best_idx])
-        
-        ideal_arch = [
-            ("Propagate", target_f1),
-            ("ThinLens", target_f1),
-            ("Propagate", target_f1 + target_f2),
-            ("ThinLens", target_f2),
-            ("Propagate", target_f2)
-        ]
-        
-        st.subheader("Learned Architecture Sequence")
-        for i, (op, val) in enumerate(final_arch):
-            if op == "Identity":
-                st.markdown(f"**Block {i}:** `{op}`")
-            else:
-                # Based on the operation, determine the parameter unit
-                param_name = "z" if op == "Propagate" else ("f" if op == "ThinLens" else "w")
-                st.markdown(f"**Block {i}:** `{op}` ({param_name} = {val:.1f} um)")
-        
-        st.subheader("Architectures Schematics")
-        fig, axs = plt.subplots(3, 1, figsize=(12, 10))
-        draw_schematic(axs[0], ideal_arch, "Target Ideal 4f Architecture")
-        draw_schematic(axs[1], initial_arch, "Example Initial Super-Net State (Random)")
-        draw_schematic(axs[2], final_arch, "Final Learned Architecture (Best Individual)")
-        plt.tight_layout()
-        st.pyplot(fig)
-        
-        # Test pass
-        test_key, _ = jax.random.split(key)
-        test_batch = load_cifar_batch(batch_size=1, img_size=shape[0])
-        test_mask = test_batch[0]
-        
-        target_I = generate_target_image(shape, dx, spectrum, target_f1, target_f2, test_mask, task_choice)
-        final_I = simulate_discrete_architecture(pop_z_jnp[best_idx], pop_f_jnp[best_idx], pop_w_jnp[best_idx], pop_arch_jnp[best_idx], shape, dx, spectrum, test_mask, pad_width, task_choice)
-        
-        st.subheader("Final Output Performance (CIFAR-10 Test Sample)")
-        fig_img, axs_img = plt.subplots(1, 3, figsize=(15, 5))
-        
-        im0 = axs_img[0].imshow(test_mask, cmap='gray')
-        axs_img[0].set_title("Input Image" if task_choice == "5.1. Amplitude Imaging" else "Input Phase Mask")
-        fig_img.colorbar(im0, ax=axs_img[0])
-        
-        im1 = axs_img[1].imshow(target_I.squeeze(), cmap='gray')
-        axs_img[1].set_title("Target Ideal Output")
-        fig_img.colorbar(im1, ax=axs_img[1])
-        
-        im2 = axs_img[2].imshow(final_I.squeeze(), cmap='gray')
-        axs_img[2].set_title("Learned Architecture Output")
-        fig_img.colorbar(im2, ax=axs_img[2])
-        
-        st.pyplot(fig_img)
-    else:
-        st.info("Set your parameters on the left and hit run!")
+if __name__ == "__main__":
+    main()

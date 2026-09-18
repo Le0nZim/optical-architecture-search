@@ -1,57 +1,34 @@
-import jax
+"""Compare sampled thin-lens propagation with a target on the same sensor grid."""
+
 import jax.numpy as jnp
-import chromatix.functional as cx
 import matplotlib.pyplot as plt
-import torchvision
-import torchvision.transforms as transforms
-import torch
 
-def load_cifar_batch(batch_size, img_size):
-    transform = transforms.Compose([
-        transforms.Grayscale(num_output_channels=1),
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor()
-    ])
-    dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    loader = jax.tree_util.tree_map(lambda x: jnp.array(x.numpy()), 
-                                    next(iter(torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True))))
-    return loader[0].squeeze(1)
+from oas_core import generate_target_image, sampling_warnings, simulate_discrete_architecture
+from oas_data import load_cifar_batch
 
-shape = (64, 64)
-dx = 5.0
-spectrum = 0.532
-f1 = 500.0
-f2 = 500.0
-pad_width = 64
 
-cifar_batch = load_cifar_batch(1, shape[0])
-a_mask = cifar_batch[0]
+def main():
+    shape, dx, spectrum = (64, 64), 5., .532
+    f1, f2, padding = 500., 500., 64
+    obj = load_cifar_batch(1, shape[0], split="test", seed=42)[0]
+    architecture = jnp.array([0, 1, 0, 1, 0])
+    parameters = (jnp.array([f1, 1., f1+f2, 1., f2]),
+                  jnp.array([1., f1, 1., f2, 1.]), jnp.ones(5)*100.)
+    # Deliberately undersampled legacy settings: print that fact explicitly.
+    for message in sampling_warnings(architecture, parameters, shape, dx, spectrum, padding):
+        print(message)
+    simulated = simulate_discrete_architecture(*parameters, architecture, shape,
+                                                dx, spectrum, obj, padding)
+    target = generate_target_image(shape, dx, spectrum, f1, f2, obj)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for ax, image, title in zip(axes, (obj, simulated, target),
+            ("Input mask", "Sampled thin-lens steps", "Ideal 4f on the same sensor grid")):
+        ax.imshow(image, cmap="gray")
+        ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig("target_debug.png")
+    plt.close(fig)
 
-# Method 1: Discrete physical steps (prop, lens, prop, lens, prop)
-field1 = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-field1 = cx.amplitude_change(field1, a_mask)
-field1 = cx.transfer_propagate(field1, z=f1, n=1.0, pad_width=pad_width, mode="same")
-field1 = cx.thin_lens(field1, f=f1, n=1.0)
-field1 = cx.transfer_propagate(field1, z=f1+f2, n=1.0, pad_width=pad_width, mode="same")
-field1 = cx.thin_lens(field1, f=f2, n=1.0)
-field1 = cx.transfer_propagate(field1, z=f2, n=1.0, pad_width=pad_width, mode="same")
-I1 = field1.intensity
 
-# Method 2: Ideal 4f using cx.ff_lens
-field2 = cx.plane_wave(shape=shape, dx=dx, spectrum=spectrum, power=1.0)
-field2 = cx.amplitude_change(field2, a_mask)
-field2 = cx.ff_lens(field2, f=f1, n=1.0)
-field2 = cx.ff_lens(field2, f=f2, n=1.0)
-I2 = field2.intensity
-
-plt.figure(figsize=(15, 5))
-plt.subplot(1, 3, 1)
-plt.title("Input Mask")
-plt.imshow(a_mask, cmap='gray')
-plt.subplot(1, 3, 2)
-plt.title("Method 1: physical steps")
-plt.imshow(I1.squeeze(), cmap='gray')
-plt.subplot(1, 3, 3)
-plt.title("Method 2: ff_lens")
-plt.imshow(I2.squeeze(), cmap='gray')
-plt.savefig("target_debug.png")
+if __name__ == "__main__":
+    main()
