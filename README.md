@@ -6,6 +6,32 @@ memetic: evolutionary selection of discrete elements plus gradient updates for
 continuous, differentiable parameters. It is a heuristic, not a guarantee of an
 optimal or uniquely identifiable optical system.
 
+## Quantitative phase imaging experiments
+
+The `qpi/` benchmark adds a noise-aware experiment workflow for the research
+direction in [docs/QPI_EXPERIMENTS.md](docs/QPI_EXPERIMENTS.md). It uses physical
+phase errors in radians, a fixed incident photon budget, bounded optical
+parameters, separate train/validation/test data, and matched search baselines.
+The original GUI and demonstrations remain available below.
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-qpi.lock
+python -m pytest tests/test_qpi.py -q
+python -m qpi suite --config configs/qpi/smoke.json --seeds 0 --out runs/smoke
+python -m qpi freeze --suite runs/smoke
+python -m qpi evaluate --suite runs/smoke
+python -m qpi report --metrics runs/smoke/evaluation/metrics.csv --out runs/smoke/report
+```
+
+This smoke run checks execution, not scientific performance. Start larger
+experiments with `configs/qpi/pilot.json`, review validation and grid convergence,
+then freeze the study before evaluating test data. Full commands, baseline
+definitions, measurement assumptions, and the hardware-validation plan are in
+the experiment guide. A compilable manuscript with methods, references, and
+explicit unfilled results is in [paper/](paper/README.md).
+
 ## Install and run
 
 Python 3.12 or newer is required. Run these commands from the repository root:

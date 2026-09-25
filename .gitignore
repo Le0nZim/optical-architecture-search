@@ -17,3 +17,9 @@ _ref/
 oas_smoke_result.json
 amplitude_result.json
 phase_result.json
+
+# Reproducible QPI experiment outputs and local environment
+.venv/
+/runs/
+/paper/generated/
+/paper/build/
