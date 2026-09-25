@@ -1,0 +1,26 @@
+name: QPI benchmark
+on:
+  push:
+  pull_request:
+jobs:
+  qpi-cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      JAX_PLATFORMS: cpu
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-qpi.lock
+      - run: python -m pip install -r requirements-qpi.lock
+      - run: python -m pytest tests/test_qpi.py -q
+      - name: Run all methods through held-out reporting
+        run: |
+          python -m qpi suite --config configs/qpi/smoke.json --seeds 0 --out runs/ci
+          python -m qpi freeze --suite runs/ci
+          python -m qpi evaluate --suite runs/ci
+          python -m qpi report --metrics runs/ci/evaluation/metrics.csv --out runs/ci/report

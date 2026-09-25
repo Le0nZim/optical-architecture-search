@@ -1,0 +1,181 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,graphicx,booktabs,xcolor}
+\usepackage{placeins}
+\usepackage[hidelinks]{hyperref}
+\setlength{\emergencystretch}{2em}
+\newcommand{\todo}[1]{\par\noindent\textcolor{red}{\textbf{TODO:} #1}\par}
+\title{Noise-aware optical architecture search for constrained relative-phase imaging}
+\author{Author list and affiliations to be agreed}
+\date{Working manuscript --- results pending}
+\begin{document}
+\maketitle
+\begin{abstract}
+Optical layouts that produce high normalized phase contrast need not preserve
+enough photons for accurate measurements. We investigate joint discrete and
+continuous design of coherent imaging systems under a fixed incident illumination
+budget and bounded hardware geometry. The framework selects optical component
+families at sequential stations and optimizes their continuous parameters using
+differentiable scalar wave propagation. A shared affine phase readout permits
+analytic evaluation of expected phase error under Poisson shot noise and Gaussian
+read noise. Separate training, validation and held-out datasets support comparisons
+with random architecture proposals, restricted libraries, fixed layouts and
+freeform phase masks. \textbf{This draft specifies the implemented simulation
+method; comparative results and physical validation remain to be obtained.}
+\end{abstract}
+
+\section{Introduction}
+Optical design increasingly combines physical simulation with task-specific
+optimization. Existing work includes evolutionary topology and continuous
+parameter optimization in photonic systems~\cite{aesop}, automated discovery of
+microscopy arrangements~\cite{xlumina}, discrete--continuous compound lens
+design~\cite{teh}, reconfigurable diffractive systems and lens-component
+deletion~\cite{chord,zhang}, diffractive quantitative phase imaging~\cite{mengu}, and
+experimentally demonstrated phase microscopy with learned metasurface
+optics~\cite{neuralphase}. These establish substantial prior art for the broad
+ingredients of this study.
+
+Our question is whether categorical selection among bounded conventional
+free-space components improves relative-phase estimation under explicit photon
+and geometric constraints. We use Chromatix~\cite{chromatix} for differentiable
+wave propagation and compare alternative design strategies under the same
+measurement model. The intended contribution is an evaluated constrained imaging
+study and reproducible search framework, conditional on the evidence below.
+\todo{Update the full novelty matrix near submission. Do not claim the first
+optical architecture search, differentiable optical design, or optical phase
+recovery. State the demonstrated contribution after experiments.}
+
+\section{Methods}
+\subsection{Object, optics and sensor}
+For a phase map $\phi$ defined relative to a known zero-phase background, the
+illuminated object field is $u_0=A\exp(i\phi)$. The current model assumes unit
+object transmission within a finite square illumination region, coherent
+monochromatic paraxial scalar propagation, and no polarization or multiple
+scattering. Default phantoms have peak relative phase at most $0.5$ rad.
+An intensity measurement cannot determine a global phase offset.
+
+A candidate comprises $K$ sequential stations, each containing a categorical
+element or identity, and $K+1$ free-space gaps. The gaps satisfy
+\begin{equation}
+ z_j=z_{\min}+[L-(K+1)z_{\min}]\,
+ \frac{\exp r_j}{\sum_k\exp r_k},\qquad \sum_j z_j=L.
+\end{equation}
+The library includes thin lenses, hard and soft pupils, axicons, gratings and a
+circular phase disk. A separate baseline uses bounded freeform phase masks.
+Focal lengths and widths are bounded by sigmoid transforms; phase heights use a
+scaled hyperbolic tangent. Installed components have finite apertures and explicit
+transmission. An upper bound limits their count. These constraints do not yet
+represent a discrete vendor catalog or a complete aberration model.
+
+The field is padded once and cropped at the detector. FFT propagation retains
+periodic outer boundaries. Grid and padding convergence are assessed at fixed
+physical parameters. The detector currently uses point samples rather than
+finite-area pixel integration. Optical intensity $I_i$ is expressed relative to
+the fixed incident intensity, never normalized by the output image or its truth.
+
+\subsection{Noise-aware phase objective}
+For incident photons per input pixel $D$, detector quantum efficiency $q$, and
+read standard deviation $s$ in electrons, the modeled measurement is
+\begin{equation}
+ Y_i=P_i+\epsilon_i,\quad P_i\sim\operatorname{Poisson}(DqI_i),\quad
+ \epsilon_i\sim\mathcal N(0,s^2).
+\end{equation}
+Noise samples are independent across pixels. With $J_i=Y_i/(Dq)$ and affine
+readout $\widehat\phi_i=aJ_i+b$, the exact expected squared error is
+\begin{equation}\label{eq:risk}
+ \mathbb E[(\widehat\phi_i-\phi_i)^2]
+ =(aI_i+b-\phi_i)^2+a^2\left[\frac{I_i}{Dq}+\frac{s^2}{(Dq)^2}\right].
+\end{equation}
+This follows from the mean and variance of the specified measurement and requires
+no Gaussian approximation to the Poisson distribution. Saturation, dark current,
+ADC quantization and detector correlations are not currently included.
+
+For each candidate, readout coefficients are fitted only on the training ROI:
+\begin{equation}
+ a=\frac{\operatorname{Cov}(I,\phi)}{\operatorname{Var}(I)+
+       \mathbb E[v(I)]+\varepsilon},\qquad
+ b=\mathbb E[\phi]-a\mathbb E[I],
+\end{equation}
+where $v(I)=I/(Dq)+s^2/(Dq)^2$ and $\varepsilon$ is a small conditioning ridge.
+An upright or inverted sensor-coordinate convention is selected by training
+risk with the same options for all methods. Calibration is fixed during
+validation, test, and dose/defocus sweeps. The differentiable objective profiles
+through this training-only fit; orientation is a piecewise discrete choice.
+The final objective averages Eq.~\ref{eq:risk} over the ROI and optional defocus
+ensemble, with an optional penalty per installed component.
+
+\subsection{Search and comparisons}
+The memetic algorithm alternates local Adam updates with validation selection
+and categorical/continuous mutation. Sampled hard-pupil and phase-disk widths
+are mutated without gradient updates. Adam moments reset at each generation;
+elite optical parameters are retained. A separate archive preserves the best
+evaluated design before breeding.
+
+The main controls are random architecture proposals with the same local update
+budget, a restricted element library, an optimized fixed lens--phase-disk--lens
+sequence, and optimized freeform masks. A noise-free objective ablation omits
+noise from training, readout fitting and selection, but uses the same noisy test.
+Defocus-only optics and a constant training-mean predictor test whether useful
+phase information is extracted. The six optimized methods match population,
+generations and gradient steps; parameter counts and actual wall times differ.
+The fixed/freeform controls are generic implementations, not reproductions of
+published networks or commercial microscopes.
+
+\subsection{Data and evaluation protocol}
+Default data are independently seeded phase phantoms; the shape-shift set uses
+sharp ellipses. Custom calibrated phase maps can be imported with group-disjoint
+acquisitions. Training fits optical parameters and readout, validation selects
+the design, and the saved selection is checksummed before the separate test
+command. The primary endpoint is held-out phase RMSE at training dose and nominal
+sensor position. Secondary endpoints include dose response, defocus, shape shift,
+throughput and exact sampled-camera error. The readout is not refitted for these
+conditions. Each evaluation uses one modeled exposure per specimen.
+
+RMSE is calculated per independent search seed before averaging. The generated
+descriptive bootstrap intervals resample seeds conditional on the fixed test
+specimens; pixels and repeated noise draws are not independent biological samples.
+\todo{Specify the final datasets, physical sampling, hyperparameter budget,
+effect-size target, seed count, convergence tolerances, hardware calibration,
+and specimen-level uncertainty analysis before unblinding the main study.}
+
+\section{Results}
+\todo{Report all prespecified methods, failed runs and budgets. Include null or
+negative findings. Smoke tests establish execution only.}
+\IfFileExists{generated/results_table.tex}{%
+\begin{table}[ht]\centering\small
+\input{generated/results_table.tex}
+\caption{Automatically generated nominal-condition simulation results. Confirm
+study identity, final protocol and adequate replication before publication.}
+\end{table}}{\todo{Insert the table generated from the frozen evaluated study.}}
+\IfFileExists{generated/dose_accuracy.pdf}{%
+\begin{figure}[ht]\centering
+\includegraphics[width=.85\linewidth]{generated/dose_accuracy.pdf}
+\caption{Simulated dose response of fixed trained designs and readouts. Bands,
+when present, describe variation across search seeds on a fixed test set.}
+\end{figure}}{\todo{Insert the generated dose--accuracy figure after validation.}}
+\todo{Add fixed-design convergence, architecture/complexity analysis, strong
+published-method controls and measured optical validation.}
+
+\FloatBarrier
+\section{Discussion}
+Any observed gain must be separated from numerical artifacts, unequal tuning,
+readout capacity, and assumptions about photon or component efficiency. The
+current model is restricted to weak relative phase, simple calibration, a bounded
+sequential path and ideal scalar components. Synthetic shape generalization does
+not establish biological generalization. A convincing experimental claim needs
+measured detector/optics calibration, phase standards, independent specimens and
+appropriate reference-exposure accounting. Global optimality and uniqueness of a
+recovered optical layout are not implied by heuristic search.
+\todo{Discuss demonstrated advantages and failure modes only after results exist.}
+
+\section*{Code and data availability}
+Code is available in the
+\href{https://github.com/Le0nZim/optical-architecture-search}{Optical Architecture Search repository}.
+Runs export configurations, physical prescriptions, calibration, code hashes,
+dependencies, dataset hashes and per-specimen metrics.
+\todo{Archive the final release and permitted datasets with permanent identifiers;
+specify the exact release used. Confirm author contributions and funding.}
+\bibliographystyle{unsrt}
+\bibliography{references}
+\end{document}
